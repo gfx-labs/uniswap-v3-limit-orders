@@ -207,6 +207,12 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     bool public isShutdown;
 
     /**
+     * @notice The ETH Fast Gas Feed heartbeat.
+     * @dev If answer is stale, owner set gas price is used.
+     */
+    uint256 public fastGasHeartbeat = 7200;
+
+    /**
      * @notice Chainlink Fast Gas Feed.
      * @dev Feed for ETH Mainnet 0x169E633A2D1E6c10dD91238Ba11c4A708dfEF37C.
      */
@@ -233,11 +239,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
      */
     uint16 public constant MAX_FILLS_PER_UPKEEP = 20;
 
-    /**
-     * @notice The ETH Fast Gas Feed heartbeat.
-     * @dev If answer is stale, owner set gas price is used.
-     */
-    uint256 public constant FAST_GAS_HEARTBEAT = 7200;
+
 
     /**
      * @notice Function signature used to create V1 Upkeep versions.
@@ -464,6 +466,15 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     function setMinimumAssets(uint256 amount, ERC20 asset) external onlyOwner {
         minimumAssets[asset] = amount;
     }
+    /**
+     * @notice Allows owner to set the gas heartbeat
+     * @param duration the duration to set the new gas heartbeat duration to
+     */
+    function setFastGasHeartbeat(uint256 duration) external onlyOwner {
+        fastGasHeartbeat = duration;
+    }
+
+
 
     /**
      * @notice Allows owner to change the gas limit value used to determine the Native asset fee needed to claim orders.

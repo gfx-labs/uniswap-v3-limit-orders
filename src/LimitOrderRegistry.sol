@@ -239,6 +239,15 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
      */
     uint16 public constant MAX_FILLS_PER_UPKEEP = 20;
 
+    /**
+     * @notice the amount of weth fees collected so far
+     */
+    uint256 public collectedWETHFee = 0; // clear the fee
+
+    /**
+     * @notice the amount of native fees collected thus far
+     */
+    uint256 public collectedNativeETHFee = 0; // clear the fee
 
 
     /**
@@ -538,8 +547,10 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
      * @notice Allows owner to withdraw wrapped native and native assets from this contract.
      */
     function withdrawNative() external onlyOwner {
-        uint256 wrappedNativeBalance = WRAPPED_NATIVE.balanceOf(address(this));
-        uint256 nativeBalance = address(this).balance;
+        uint256 wrappedNativeBalance = collectedWETHFee;
+        uint256 nativeBalance = collectedNativeETHFee;
+        collectedWETHFee = 0;
+        collectedNativeETHFee = 0;
         // Make sure there is something to withdraw.
         if (wrappedNativeBalance == 0 && nativeBalance == 0) revert LimitOrderRegistry__ZeroNativeBalance();
 
@@ -569,7 +580,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     }
 
     /*//////////////////////////////////////////////////////////////
-                        USER ORDER MANAGEMENT LOGIC
+      USER ORDER MANAGEMENT LOGIC
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -761,10 +772,12 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
         // Transfer fee in.
         address sender = _msgSender();
         if (msg.value >= userClaim.feePerUser) {
+            collectedNativeETHFee += userClaim.feePerUser;
             // refund if necessary.
             uint256 refund = msg.value - userClaim.feePerUser;
             if (refund > 0) sender.safeTransferETH(refund);
         } else {
+            collectedWETHFee += userClaim.feePerUser;
             WRAPPED_NATIVE.safeTransferFrom(sender, address(this), userClaim.feePerUser);
             // If value is non zero send it back to caller.
             if (msg.value > 0) sender.safeTransferETH(msg.value);
@@ -898,7 +911,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     }
 
     /*//////////////////////////////////////////////////////////////
-                     CHAINLINK AUTOMATION LOGIC
+      CHAINLINK AUTOMATION LOGIC
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -997,7 +1010,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     }
 
     /*//////////////////////////////////////////////////////////////
-                     INTERNAL ORDER LOGIC
+      INTERNAL ORDER LOGIC
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -1263,14 +1276,14 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
 
         // Create increase liquidity params.
         NonFungiblePositionManager.IncreaseLiquidityParams memory params = NonFungiblePositionManager
-            .IncreaseLiquidityParams({
-                tokenId: positionId,
-                amount0Desired: amount0,
-                amount1Desired: amount1,
-                amount0Min: amount0Min,
-                amount1Min: amount1Min,
-                deadline: deadline
-            });
+        .IncreaseLiquidityParams({
+            tokenId: positionId,
+            amount0Desired: amount0,
+            amount1Desired: amount1,
+            amount0Min: amount0Min,
+            amount1Min: amount1Min,
+            deadline: deadline
+        });
 
         // Increase liquidity in pool.
         POSITION_MANAGER.increaseLiquidity(params);
@@ -1385,13 +1398,13 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
         // NB: because the amount0Min and amount1Min are 0 here, it is technically possible to front run this
         // that is probably okay, but it should be noted
         NonFungiblePositionManager.DecreaseLiquidityParams memory params = NonFungiblePositionManager
-            .DecreaseLiquidityParams({
-                tokenId: target,
-                liquidity: liquidity,
-                amount0Min: 0,
-                amount1Min: 0,
-                deadline: deadline
-            });
+        .DecreaseLiquidityParams({
+            tokenId: target,
+            liquidity: liquidity,
+            amount0Min: 0,
+            amount1Min: 0,
+            deadline: deadline
+        });
 
         // Decrease liquidity in pool.
         uint128 amount0;
@@ -1473,7 +1486,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     }
 
     /*//////////////////////////////////////////////////////////////
-                            VIEW LOGIC
+      VIEW LOGIC
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -1488,7 +1501,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
             }
             uint256 timeSinceLastUpdate = block.timestamp - _timestamp;
             // Check answer is not stale.
-            if (timeSinceLastUpdate > FAST_GAS_HEARTBEAT) {
+            if (timeSinceLastUpdate > fastGasHeartbeat) {
                 // If answer is stale use owner set value.
                 // Multiply by 1e9 to convert gas price to gwei
                 return uint256(upkeepGasPrice) * upkeepGasMultiplier;
@@ -1548,15 +1561,15 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
      * @notice Helper function to get OrderBook/BatchOrder
      * @param id the id to get info for
      * @return Batchorder the batch order at id
-    */
+     */
     function getOrderBook(uint256 id) external view returns (BatchOrder memory) {
         return orderBook[id];
     }
-/**
+    /**
      * @notice Helper function to get claim
      * @param batchId the id to get info for
      * @return Claim the claim info at id
-    */
+     */
     function getClaim(uint128 batchId) external view returns (Claim memory) {
         return claim[batchId];
     }

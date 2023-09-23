@@ -167,6 +167,12 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     uint32 public upkeepGasPrice = 30;
 
     /**
+     * @notice multiplied by upkeep gas for the total gas to be used for fulfill an order
+     * @dev Changeable by owner.
+     */
+    uint256 public upkeepGasMultiplier = 1e9;
+
+    /**
      * @notice Max number of orders that can be filled in 1 upkeep call.
      * @dev Changeable by owner.
      */
@@ -216,6 +222,11 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
      * @dev In units of gwei.
      */
     uint32 public constant MAX_GAS_PRICE = 1_000;
+
+    /**
+     * @notice The max possible gas price the owner can set for the gas multiplier.
+     */
+    uint256 public constant MAX_GAS_MULTIPLIER = 1e9 * 1e3;
 
     /**
      * @notice The max number of orders that can be fulfilled in a single upkeep TX.
@@ -319,6 +330,8 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     error LimitOrderRegistry__AmountShouldBeZero();
     // @notice When direction for the order doesn't match what state has.
     error LimitOrderRegistry__DirectionMisMatch();
+    // @notice When gas oracle sequencer is down
+    error LimitOrderRegistry__SequencerDown();
 
     /*//////////////////////////////////////////////////////////////
                                  ENUMS
@@ -465,13 +478,24 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
 
     /**
      * @notice Allows owner to change the gas price used to determine the Native asset fee needed to claim orders.
-     * @param gasPrice the gas limit that the upkeepGasPrice will be set to
-     * @dev `gasPrice` uses units of gwei.
+     * @param gasPrice the gas price that the upkeepGasPrice will be set to
+     * @dev `gasPrice` uses units of the gasMultiplier
      */
     function setUpkeepGasPrice(uint32 gasPrice) external onlyOwner {
         // should revert if the gas price provided is greater than the provided max gas price.
         if (gasPrice > MAX_GAS_PRICE) revert LimitOrderRegistry__InvalidGasPrice();
         upkeepGasPrice = gasPrice;
+    }
+
+/**
+     * @notice Allows owner to change the gas price used to determine the Native asset fee needed to claim orders.
+     * @param gasMultiplier the gas multiplier that the upkeepGasMultiplier will be set to
+     * @dev `gasMultiplier` uses no particular units
+     */
+    function setUpkeepGasMultiplier(uint32 gasMultiplier) external onlyOwner {
+        // should revert if the gas price provided is greater than the provided max gas price.
+        if (gasMultiplier > MAX_GAS_MULTIPLIER) revert LimitOrderRegistry__InvalidGasPrice();
+        upkeepGasMultiplier = gasMultiplier;
     }
 
     /**
@@ -1448,12 +1472,15 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
         // If gas feed is set use it.
         if (fastGasFeed != address(0)) {
             (, int256 _answer, , uint256 _timestamp, ) = IChainlinkAggregator(fastGasFeed).latestRoundData();
+            if (_answer == 0) {
+                revert LimitOrderRegistry__SequencerDown();
+            }
             uint256 timeSinceLastUpdate = block.timestamp - _timestamp;
             // Check answer is not stale.
             if (timeSinceLastUpdate > FAST_GAS_HEARTBEAT) {
                 // If answer is stale use owner set value.
                 // Multiply by 1e9 to convert gas price to gwei
-                return uint256(upkeepGasPrice) * 1e9;
+                return uint256(upkeepGasPrice) * upkeepGasMultiplier;
             } else {
                 // Else use the datafeed value.
                 uint256 answer = uint256(_answer);
@@ -1461,7 +1488,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
             }
         }
         // Else use owner set value.
-        return uint256(upkeepGasPrice) * 1e9; // Multiply by 1e9 to convert gas price to gwei
+        return uint256(upkeepGasPrice) * upkeepGasMultiplier; // Multiply by 1e9 to convert gas price to gwei
     }
 
     /**

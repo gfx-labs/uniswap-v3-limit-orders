@@ -745,7 +745,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
         uint256 owed = (totalTokenOut * depositAmount) / totalTokenDeposited;
 
         // Transfer tokens owed to user.
-        tokenOut.safeTransfer(user, owed);
+        if (owed > 0) tokenOut.safeTransfer(user, owed);
 
         // Transfer fee in.
         address sender = _msgSender();

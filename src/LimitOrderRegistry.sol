@@ -219,6 +219,12 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     address public fastGasFeed;
 
     /**
+     * @notice Chainlink sequencer uptime feed
+     * @dev not needed if there is no uptime feed for the sequencer
+     */
+    address public sequencerUptimeFeed;
+
+    /**
      * @notice The max possible gas the owner can set for the gas limit.
      */
     uint32 public constant MAX_GAS_LIMIT = 750_000;
@@ -483,7 +489,13 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
         fastGasHeartbeat = duration;
     }
 
-
+    /**
+     * @notice Allows owner to set the sequencer uptime feedr
+     * @param feed the address of the new feed
+     */
+    function setSequencerUptimeFeed(address feed) external onlyOwner {
+        sequencerUptimeFeed = feed;
+    }
 
     /**
      * @notice Allows owner to change the gas limit value used to determine the Native asset fee needed to claim orders.
@@ -1495,6 +1507,10 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     function getGasPrice() public view returns (uint256) {
         // If gas feed is set use it.
         if (fastGasFeed != address(0)) {
+            (, int256 sequencerAnswer, , , ) = IChainlinkAggregator(sequencerUptimeFeed).latestRoundData();
+            if (sequencerAnswer == 0) {
+                revert LimitOrderRegistry__SequencerDown();
+            }
             (, int256 _answer, , uint256 _timestamp, ) = IChainlinkAggregator(fastGasFeed).latestRoundData();
             if (_answer == 0) {
                 revert LimitOrderRegistry__SequencerDown();

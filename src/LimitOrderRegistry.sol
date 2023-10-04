@@ -1508,7 +1508,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
         // If gas feed is set use it.
         if (fastGasFeed != address(0)) {
             (, int256 sequencerAnswer, , , ) = IChainlinkAggregator(sequencerUptimeFeed).latestRoundData();
-            if (sequencerAnswer == 0) {
+            if (sequencerAnswer != 0) {
                 revert LimitOrderRegistry__SequencerDown();
             }
             (, int256 _answer, , uint256 _timestamp, ) = IChainlinkAggregator(fastGasFeed).latestRoundData();

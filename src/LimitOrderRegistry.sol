@@ -167,6 +167,12 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     uint32 public upkeepGasPrice = 30;
 
     /**
+     * @notice multiplied by upkeep gas for the total gas to be used for fulfill an order
+     * @dev Changeable by owner.
+     */
+    uint256 public upkeepGasMultiplier = 1e9;
+
+    /**
      * @notice Max number of orders that can be filled in 1 upkeep call.
      * @dev Changeable by owner.
      */
@@ -201,10 +207,22 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     bool public isShutdown;
 
     /**
+     * @notice The ETH Fast Gas Feed heartbeat.
+     * @dev If answer is stale, owner set gas price is used.
+     */
+    uint256 public fastGasHeartbeat = 7200;
+
+    /**
      * @notice Chainlink Fast Gas Feed.
      * @dev Feed for ETH Mainnet 0x169E633A2D1E6c10dD91238Ba11c4A708dfEF37C.
      */
     address public fastGasFeed;
+
+    /**
+     * @notice Chainlink sequencer uptime feed
+     * @dev not needed if there is no uptime feed for the sequencer
+     */
+    address public sequencerUptimeFeed;
 
     /**
      * @notice The max possible gas the owner can set for the gas limit.
@@ -218,15 +236,25 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     uint32 public constant MAX_GAS_PRICE = 1_000;
 
     /**
+     * @notice The max possible gas price the owner can set for the gas multiplier.
+     */
+    uint256 public constant MAX_GAS_MULTIPLIER = 1e9 * 1e3;
+
+    /**
      * @notice The max number of orders that can be fulfilled in a single upkeep TX.
      */
     uint16 public constant MAX_FILLS_PER_UPKEEP = 20;
 
     /**
-     * @notice The ETH Fast Gas Feed heartbeat.
-     * @dev If answer is stale, owner set gas price is used.
+     * @notice the amount of weth fees collected so far
      */
-    uint256 public constant FAST_GAS_HEARTBEAT = 7200;
+    uint256 public collectedWETHFee = 0; // clear the fee
+
+    /**
+     * @notice the amount of native fees collected thus far
+     */
+    uint256 public collectedNativeETHFee = 0; // clear the fee
+
 
     /**
      * @notice Function signature used to create V1 Upkeep versions.
@@ -319,6 +347,8 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     error LimitOrderRegistry__AmountShouldBeZero();
     // @notice When direction for the order doesn't match what state has.
     error LimitOrderRegistry__DirectionMisMatch();
+    // @notice When gas oracle sequencer is down
+    error LimitOrderRegistry__SequencerDown();
 
     /*//////////////////////////////////////////////////////////////
                                  ENUMS
@@ -451,6 +481,21 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     function setMinimumAssets(uint256 amount, ERC20 asset) external onlyOwner {
         minimumAssets[asset] = amount;
     }
+    /**
+     * @notice Allows owner to set the gas heartbeat
+     * @param duration the duration to set the new gas heartbeat duration to
+     */
+    function setFastGasHeartbeat(uint256 duration) external onlyOwner {
+        fastGasHeartbeat = duration;
+    }
+
+    /**
+     * @notice Allows owner to set the sequencer uptime feedr
+     * @param feed the address of the new feed
+     */
+    function setSequencerUptimeFeed(address feed) external onlyOwner {
+        sequencerUptimeFeed = feed;
+    }
 
     /**
      * @notice Allows owner to change the gas limit value used to determine the Native asset fee needed to claim orders.
@@ -465,13 +510,24 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
 
     /**
      * @notice Allows owner to change the gas price used to determine the Native asset fee needed to claim orders.
-     * @param gasPrice the gas limit that the upkeepGasPrice will be set to
-     * @dev `gasPrice` uses units of gwei.
+     * @param gasPrice the gas price that the upkeepGasPrice will be set to
+     * @dev `gasPrice` uses units of the gasMultiplier
      */
     function setUpkeepGasPrice(uint32 gasPrice) external onlyOwner {
         // should revert if the gas price provided is greater than the provided max gas price.
         if (gasPrice > MAX_GAS_PRICE) revert LimitOrderRegistry__InvalidGasPrice();
         upkeepGasPrice = gasPrice;
+    }
+
+/**
+     * @notice Allows owner to change the gas price used to determine the Native asset fee needed to claim orders.
+     * @param gasMultiplier the gas multiplier that the upkeepGasMultiplier will be set to
+     * @dev `gasMultiplier` uses no particular units
+     */
+    function setUpkeepGasMultiplier(uint32 gasMultiplier) external onlyOwner {
+        // should revert if the gas price provided is greater than the provided max gas price.
+        if (gasMultiplier > MAX_GAS_MULTIPLIER) revert LimitOrderRegistry__InvalidGasPrice();
+        upkeepGasMultiplier = gasMultiplier;
     }
 
     /**
@@ -503,8 +559,10 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
      * @notice Allows owner to withdraw wrapped native and native assets from this contract.
      */
     function withdrawNative() external onlyOwner {
-        uint256 wrappedNativeBalance = WRAPPED_NATIVE.balanceOf(address(this));
-        uint256 nativeBalance = address(this).balance;
+        uint256 wrappedNativeBalance = collectedWETHFee;
+        uint256 nativeBalance = collectedNativeETHFee;
+        collectedWETHFee = 0;
+        collectedNativeETHFee = 0;
         // Make sure there is something to withdraw.
         if (wrappedNativeBalance == 0 && nativeBalance == 0) revert LimitOrderRegistry__ZeroNativeBalance();
 
@@ -534,7 +592,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     }
 
     /*//////////////////////////////////////////////////////////////
-                        USER ORDER MANAGEMENT LOGIC
+      USER ORDER MANAGEMENT LOGIC
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -721,15 +779,17 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
         uint256 owed = (totalTokenOut * depositAmount) / totalTokenDeposited;
 
         // Transfer tokens owed to user.
-        tokenOut.safeTransfer(user, owed);
+        if (owed > 0) tokenOut.safeTransfer(user, owed);
 
         // Transfer fee in.
         address sender = _msgSender();
         if (msg.value >= userClaim.feePerUser) {
+            collectedNativeETHFee += userClaim.feePerUser;
             // refund if necessary.
             uint256 refund = msg.value - userClaim.feePerUser;
             if (refund > 0) sender.safeTransferETH(refund);
         } else {
+            collectedWETHFee += userClaim.feePerUser;
             WRAPPED_NATIVE.safeTransferFrom(sender, address(this), userClaim.feePerUser);
             // If value is non zero send it back to caller.
             if (msg.value > 0) sender.safeTransferETH(msg.value);
@@ -863,7 +923,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     }
 
     /*//////////////////////////////////////////////////////////////
-                     CHAINLINK AUTOMATION LOGIC
+      CHAINLINK AUTOMATION LOGIC
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -962,7 +1022,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     }
 
     /*//////////////////////////////////////////////////////////////
-                     INTERNAL ORDER LOGIC
+      INTERNAL ORDER LOGIC
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -1228,14 +1288,14 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
 
         // Create increase liquidity params.
         NonFungiblePositionManager.IncreaseLiquidityParams memory params = NonFungiblePositionManager
-            .IncreaseLiquidityParams({
-                tokenId: positionId,
-                amount0Desired: amount0,
-                amount1Desired: amount1,
-                amount0Min: amount0Min,
-                amount1Min: amount1Min,
-                deadline: deadline
-            });
+        .IncreaseLiquidityParams({
+            tokenId: positionId,
+            amount0Desired: amount0,
+            amount1Desired: amount1,
+            amount0Min: amount0Min,
+            amount1Min: amount1Min,
+            deadline: deadline
+        });
 
         // Increase liquidity in pool.
         POSITION_MANAGER.increaseLiquidity(params);
@@ -1350,13 +1410,13 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
         // NB: because the amount0Min and amount1Min are 0 here, it is technically possible to front run this
         // that is probably okay, but it should be noted
         NonFungiblePositionManager.DecreaseLiquidityParams memory params = NonFungiblePositionManager
-            .DecreaseLiquidityParams({
-                tokenId: target,
-                liquidity: liquidity,
-                amount0Min: 0,
-                amount1Min: 0,
-                deadline: deadline
-            });
+        .DecreaseLiquidityParams({
+            tokenId: target,
+            liquidity: liquidity,
+            amount0Min: 0,
+            amount1Min: 0,
+            deadline: deadline
+        });
 
         // Decrease liquidity in pool.
         uint128 amount0;
@@ -1438,7 +1498,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     }
 
     /*//////////////////////////////////////////////////////////////
-                            VIEW LOGIC
+      VIEW LOGIC
     //////////////////////////////////////////////////////////////*/
 
     /**
@@ -1447,13 +1507,20 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
     function getGasPrice() public view returns (uint256) {
         // If gas feed is set use it.
         if (fastGasFeed != address(0)) {
+            (, int256 sequencerAnswer, , , ) = IChainlinkAggregator(sequencerUptimeFeed).latestRoundData();
+            if (sequencerAnswer != 0) {
+                revert LimitOrderRegistry__SequencerDown();
+            }
             (, int256 _answer, , uint256 _timestamp, ) = IChainlinkAggregator(fastGasFeed).latestRoundData();
+            if (_answer == 0) {
+                revert LimitOrderRegistry__SequencerDown();
+            }
             uint256 timeSinceLastUpdate = block.timestamp - _timestamp;
             // Check answer is not stale.
-            if (timeSinceLastUpdate > FAST_GAS_HEARTBEAT) {
+            if (timeSinceLastUpdate > fastGasHeartbeat) {
                 // If answer is stale use owner set value.
                 // Multiply by 1e9 to convert gas price to gwei
-                return uint256(upkeepGasPrice) * 1e9;
+                return uint256(upkeepGasPrice) * upkeepGasMultiplier;
             } else {
                 // Else use the datafeed value.
                 uint256 answer = uint256(_answer);
@@ -1461,7 +1528,7 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
             }
         }
         // Else use owner set value.
-        return uint256(upkeepGasPrice) * 1e9; // Multiply by 1e9 to convert gas price to gwei
+        return uint256(upkeepGasPrice) * upkeepGasMultiplier; // Multiply by 1e9 to convert gas price to gwei
     }
 
     /**
@@ -1510,15 +1577,15 @@ contract LimitOrderRegistry is Owned, AutomationCompatibleInterface, ERC721Holde
      * @notice Helper function to get OrderBook/BatchOrder
      * @param id the id to get info for
      * @return Batchorder the batch order at id
-    */
+     */
     function getOrderBook(uint256 id) external view returns (BatchOrder memory) {
         return orderBook[id];
     }
-/**
+    /**
      * @notice Helper function to get claim
      * @param batchId the id to get info for
      * @return Claim the claim info at id
-    */
+     */
     function getClaim(uint128 batchId) external view returns (Claim memory) {
         return claim[batchId];
     }
